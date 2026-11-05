@@ -1914,7 +1914,7 @@ export class Niivue extends EventTarget {
 
         this.volumes[volIdx].cal_min = result.calMin
         this.volumes[volIdx].cal_max = result.calMax
-        this.refreshLayers(this.volumes[volIdx], 0)
+        this.refreshVolumeLayer(volIdx)
         // set the current mouse position (window space) as the new reference point
         // for the next comparison
         this.uiData.windowX = result.windowX
@@ -3613,7 +3613,7 @@ export class Niivue extends EventTarget {
             global_min: this.volumes[volIndex].global_min!,
             threshold
         })
-        this.refreshLayers(this.volumes[volIndex], 0)
+        this.refreshVolumeLayer(volIndex)
         this.drawScene()
     }
 
@@ -6815,6 +6815,33 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             robust_min: this.volumes[layer].robust_min!,
             robust_max: this.volumes[layer].robust_max!,
             area
+        }
+    }
+
+    /**
+     * Re-render the GPU texture that displays the volume at `volIdx` after its display
+     * properties (e.g. cal_min/cal_max) changed in place.
+     * The background (index 0) owns its own texture. Overlays (index > 0) are blended
+     * into one shared texture, so every overlay is recomposited in layer order; refreshing
+     * an overlay as layer 0 would replace the background with it.
+     * @param volIdx - index of the volume in this.volumes
+     * @internal
+     */
+    refreshVolumeLayer(volIdx: number): void {
+        if (volIdx <= 0) {
+            this.refreshLayers(this.volumes[0], 0)
+            return
+        }
+        // same layer numbering as updateGLVolume(): only volumes that are ready count
+        let layer = 0
+        for (let i = 0; i < this.volumes.length; i++) {
+            if (!this.volumes[i].toRAS) {
+                continue
+            }
+            if (layer > 0) {
+                this.refreshLayers(this.volumes[i], layer)
+            }
+            layer++
         }
     }
 
