@@ -196,6 +196,12 @@ export class Niivue extends EventTarget {
     private _batchDepth = 0 // > 0 while inside batchUpdate()
     private _batchNeedsGLVolume = false // updateGLVolume() was requested during a batch
     private _batchNeedsDraw = false // drawScene() was requested during a batch
+    private _batchNeedsVoxelData = false // a batched updateGLVolume() did not allow reusing voxel textures
+    // GPU textures derived from voxels, kept per volume for updateGLVolume({ reuseVoxelData: true })
+    private _voxelTextureCache = new Map<NVImage, VolumeTexture.VoxelTextureCacheEntry>()
+    // inputs of the last background (layer 0) composite, to skip identical re-composites
+    private _backBake: { texture: WebGLTexture | null; refs: unknown[]; key: string } | null = null
+    private _colormapLuts: Uint8ClampedArray | null = null // rows uploaded by the last refreshColormaps()
     colormapTexture: WebGLTexture | null = null // the GPU memory storage of the colormap
     colormapLists: ColormapListEntry[] = [] // one entry per colorbar: min, max, tic
     volumeTexture: WebGLTexture | null = null // the GPU memory storage of the volume
@@ -1810,7 +1816,7 @@ export class Niivue extends EventTarget {
                     return
                 }
                 this.calculateNewRange({ volIdx: 0 })
-                this.refreshLayers(this.volumes[0], 0)
+                this.refreshLayers(this.volumes[0], 0, true)
             }
             if (currentDragMode === DRAG_MODE.measurement) {
                 // Save completed measurement line with slice info
@@ -1961,7 +1967,7 @@ export class Niivue extends EventTarget {
             // if drag mode is contrast, and the user double taps and drags...
             if (this.getCurrentDragMode() === DRAG_MODE.contrast) {
                 this.calculateNewRange()
-                this.refreshLayers(this.volumes[0], 0)
+                this.refreshLayers(this.volumes[0], 0, true)
             }
             const fracStart = this.canvasPos2frac([this.uiData.dragStart[0], this.uiData.dragStart[1]])
             const fracEnd = this.canvasPos2frac([this.uiData.dragEnd[0], this.uiData.dragEnd[1]])
@@ -2003,7 +2009,7 @@ export class Niivue extends EventTarget {
 
         this.volumes[volIdx].cal_min = result.calMin
         this.volumes[volIdx].cal_max = result.calMax
-        this.refreshVolumeLayer(volIdx)
+        this.refreshVolumeLayer(volIdx, true)
         // set the current mouse position (window space) as the new reference point
         // for the next comparison
         this.uiData.windowX = result.windowX
@@ -2217,7 +2223,7 @@ export class Niivue extends EventTarget {
         this.volumes[0].cal_max = this.volumes[0].robust_max
         this._emitEvent('intensityChange', this.volumes[0])
         this.onIntensityChange(this.volumes[0])
-        this.refreshLayers(this.volumes[0], 0)
+        this.refreshLayers(this.volumes[0], 0, true)
         this.drawScene()
     }
 
@@ -4567,7 +4573,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
      */
     setOpacity(volIdx: number, newOpacity: number): void {
         VolumeManager.setOpacity(this.volumes, volIdx, newOpacity)
-        this.updateGLVolume()
+        this.updateGLVolume({ reuseVoxelData: true })
     }
 
     /**
@@ -6864,11 +6870,13 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             return
         }
         const needsGLVolume = this._batchNeedsGLVolume
+        const needsVoxelData = this._batchNeedsVoxelData
         const needsDraw = this._batchNeedsDraw
         this._batchNeedsGLVolume = false
+        this._batchNeedsVoxelData = false
         this._batchNeedsDraw = false
         if (needsGLVolume) {
-            this.updateGLVolume() // also draws the scene
+            this.updateGLVolume({ reuseVoxelData: !needsVoxelData }) // also draws the scene
         } else if (needsDraw) {
             this.drawScene()
         }
@@ -6876,15 +6884,29 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
 
     /**
      * update the webGL 2.0 scene after making changes to the array of volumes. It's always good to call this method after altering one or more volumes manually (outside of Niivue setter methods)
+     * @param options - `reuseVoxelData: true` declares that no volume's voxel array (`img`) was modified
+     *   in place since the last update; only display properties (cal_min/cal_max, colormap, opacity,
+     *   threshold_min/threshold_max, ...), the volume list, `frame4D` or a replaced `img` array changed.
+     *   Voxel and modulation textures kept on the GPU from the previous such update are then reused
+     *   instead of being converted and uploaded again, and the background is only recomposited (and
+     *   its 3D lighting gradient recomputed) if its own display changed. Keeping these textures costs
+     *   GPU memory (one copy of each volume's voxels); they are released when a volume is removed.
+     *   Default false: everything is uploaded again.
      * @example
      * niivue = new Niivue()
      * niivue.updateGLVolume()
+     * niivue.volumes[1].cal_max = 8
+     * niivue.updateGLVolume({ reuseVoxelData: true })
      * @see {@link https://niivue.com/demos/features/colormaps.html | live demo usage}
      */
-    updateGLVolume(): void {
+    updateGLVolume(options: { reuseVoxelData?: boolean } = {}): void {
+        const reuseVoxelData = options.reuseVoxelData === true
         if (this._batchDepth > 0) {
             // inside batchUpdate(): recomposite once when the outermost batch ends
             this._batchNeedsGLVolume = true
+            if (!reuseVoxelData) {
+                this._batchNeedsVoxelData = true
+            }
             return
         }
         // load volume or change contrast
@@ -6898,9 +6920,10 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             if (!this.volumes[i].toRAS) {
                 continue
             }
-            this.refreshLayers(this.volumes[i], visibleLayers)
+            this.refreshLayers(this.volumes[i], visibleLayers, reuseVoxelData)
             visibleLayers++
         }
+        this.releaseUnusedVoxelTextures()
         this.furthestVertexFromOrigin = 0.0
         if (numLayers > 0) {
             this.furthestVertexFromOrigin = this.volumeObject3D?.furthestVertexFromOrigin ?? 0
@@ -7007,11 +7030,12 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
      * into one shared texture, so every overlay is recomposited in layer order; refreshing
      * an overlay as layer 0 would replace the background with it.
      * @param volIdx - index of the volume in this.volumes
+     * @param reuseVoxelData - only display properties changed (see updateGLVolume)
      * @internal
      */
-    refreshVolumeLayer(volIdx: number): void {
+    refreshVolumeLayer(volIdx: number, reuseVoxelData = false): void {
         if (volIdx <= 0) {
-            this.refreshLayers(this.volumes[0], 0)
+            this.refreshLayers(this.volumes[0], 0, reuseVoxelData)
             return
         }
         // same layer numbering as updateGLVolume(): only volumes that are ready count
@@ -7021,7 +7045,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
                 continue
             }
             if (layer > 0) {
-                this.refreshLayers(this.volumes[i], layer)
+                this.refreshLayers(this.volumes[i], layer, reuseVoxelData)
             }
             layer++
         }
@@ -7029,9 +7053,12 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
 
     /**
      * Updates textures, shaders, and GPU state for a given overlay layer based on image properties and rendering options.
+     * @param overlayItem - the volume
+     * @param layer - its layer (0 = background)
+     * @param reuseVoxelData - only display properties changed: reuse cached voxel textures (see updateGLVolume)
      * @internal
      */
-    refreshLayers(overlayItem: NVImage, layer: number): void {
+    refreshLayers(overlayItem: NVImage, layer: number, reuseVoxelData = false): void {
         if (this.volumes.length < 1) {
             return
         } // e.g. only meshes
@@ -7053,7 +7080,12 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             this.crosshairs3D.mm![0] = NaN
         } // force crosshairs3D redraw
         let mtx = mat4.clone(overlayItem.toRAS!)
+        const modKey = VolumeModulation.modulationKey(overlayItem, hdr, this.volumes)
+        let backBake: { refs: unknown[]; key: string } | null = null
         if (layer === 0) {
+            const wasGradientStale = this._isGradientStale
+            const prevBake = this._backBake
+            this._backBake = null
             // set again below once the new background texture exists (not for the 2D-texture paths)
             this._isGradientStale = false
             // Create and assign volumeObject3D FIRST
@@ -7105,12 +7137,20 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
                 const intercept = (255 * (hdr.scl_inter - overlayItem.cal_min)) / (overlayItem.cal_max - overlayItem.cal_min)
                 const cmap = new Uint8Array(this.colormap(overlayItem.colormap))
                 const cmap_U32 = new Uint32Array(cmap.buffer)
+                const thr = VolumeLayerRenderer.thresholdBounds(overlayItem)
                 let j = -1
                 for (let i = 0; i < nPix; i++) {
-                    const v = img[i + zOffset] * scale + intercept
+                    const raw = img[i + zOffset]
+                    const v = raw * scale + intercept
                     const v255 = Math.round(Math.min(255, Math.max(0, v))) // Clamp to 0..255
                     img2D_U32[i] = cmap_U32[v255]
                     img2D[(j += 4)] = opacity
+                    if (thr.isThresholdMin || thr.isThresholdMax) {
+                        const f = raw * hdr.scl_slope + hdr.scl_inter
+                        if ((thr.isThresholdMin && !(f >= thr.thresholdMin)) || (thr.isThresholdMax && !(f <= thr.thresholdMax))) {
+                            img2D[j] = 0
+                        }
+                    }
                 }
                 this.opts.is2DSliceShader = true
                 outTexture = this.rgbaTex2D(this.volumeTexture, TEXTURE_CONSTANTS.TEXTURE0_BACK_VOL, overlayItem.dimsRAS!, img2D as Uint8Array, false)
@@ -7120,7 +7160,18 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
                 log.warn(`dimensions exceed 3D limits ${hdr.dims}`)
             }
             this.opts.is2DSliceShader = false
-            outTexture = this.rgbaTex(this.volumeTexture, TEXTURE_CONSTANTS.TEXTURE0_BACK_VOL, overlayItem.dimsRAS!) // this.back.dims)
+            backBake = this.backgroundBakeKey(overlayItem, modKey)
+            // same inputs as the current background texture: keep it (and its 3D gradient)
+            const isBackgroundCurrent =
+                reuseVoxelData &&
+                backBake !== null &&
+                prevBake !== null &&
+                prevBake.texture === this.volumeTexture &&
+                prevBake.key === backBake.key &&
+                prevBake.refs.every((r, i) => r === backBake!.refs[i])
+            if (!isBackgroundCurrent) {
+                outTexture = this.rgbaTex(this.volumeTexture, TEXTURE_CONSTANTS.TEXTURE0_BACK_VOL, overlayItem.dimsRAS!) // this.back.dims)
+            }
 
             if (!this.renderShader) {
                 throw new Error('renderShader undefined')
@@ -7137,6 +7188,12 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             this.gl.uniform1i(pickingShader.uniforms.overlay, 2)
             this.gl.uniform3fv(pickingShader.uniforms.volScale, this.volScale)
             log.debug(this.volumeObject3D)
+            if (isBackgroundCurrent) {
+                this._backBake = prevBake
+                this._isGradientStale = wasGradientStale
+                this.updateLayerShaderState(layer)
+                return
+            }
         } else {
             if (this.back?.dims === undefined) {
                 log.error('Fatal error: Unable to render overlay: background dimensions not defined!')
@@ -7168,7 +7225,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
         this.gl.viewport(0, 0, this.back.dims![1], this.back.dims![2]) // output in background dimensions
 
         // Create temporary 3D texture for volume data
-        const tempTex3D = VolumeLayerRenderer.createTemporaryTexture({
+        let tempTex3D = VolumeLayerRenderer.createTemporaryTexture({
             gl: this.gl,
             TEXTURE9_ORIENT: TEXTURE_CONSTANTS.TEXTURE9_ORIENT
         })
@@ -7182,6 +7239,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
 
         // Setup volume texture data and select appropriate shader
         let orientShader = this.orientShaderU!
+        let cacheEntry = this._voxelTextureCache.get(overlayItem)
         if (hdr.datatypeCode === NiiDataType.DT_RGBA32) {
             // RGBA32 has special PAQD handling
             const rgba32Result = VolumeLayerRenderer.setupRGBA32TextureData({
@@ -7208,6 +7266,13 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             }
         } else {
             // All other datatypes
+            const isCached = reuseVoxelData && VolumeTexture.isVoxelTextureCurrent(cacheEntry, overlayItem)
+            if (isCached) {
+                // voxels already on the GPU: bind them instead of the empty temporary texture
+                this.gl.deleteTexture(tempTex3D)
+                tempTex3D = cacheEntry!.voxels!.texture
+                this.gl.bindTexture(this.gl.TEXTURE_3D, tempTex3D)
+            }
             const uploadResult = VolumeLayerRenderer.setupVolumeTextureData({
                 gl: this.gl,
                 hdr,
@@ -7217,9 +7282,19 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
                 orientShaderF: this.orientShaderF!,
                 orientShaderRGBU: this.orientShaderRGBU!,
                 orientShaderAtlasU: this.orientShaderAtlasU!,
-                orientShaderAtlasI: this.orientShaderAtlasI!
+                orientShaderAtlasI: this.orientShaderAtlasI!,
+                upload: !isCached
             })
             orientShader = uploadResult.orientShader
+            if (!isCached && (reuseVoxelData || cacheEntry?.voxels)) {
+                // keep (or refresh) the uploaded voxels for later display-only updates
+                if (cacheEntry?.voxels) {
+                    this.gl.deleteTexture(cacheEntry.voxels.texture)
+                }
+                cacheEntry = cacheEntry ?? {}
+                cacheEntry.voxels = { texture: tempTex3D!, img: overlayItem.img, frame4D: overlayItem.frame4D, datatypeCode: hdr.datatypeCode, dims: [hdr.dims[1], hdr.dims[2], hdr.dims[3]] }
+                this._voxelTextureCache.set(overlayItem, cacheEntry)
+            }
         }
         if (overlayItem.global_min === undefined) {
             // only once, first time volume is loaded
@@ -7274,6 +7349,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             isAdditiveBlend: this.opts.isAdditiveBlend
         })
         // Setup modulation
+        const isModulationCached = reuseVoxelData && VolumeModulation.isSameModulationKey(cacheEntry?.modulation?.key, modKey)
         const { modulateTexture } = VolumeModulation.setupModulation({
             gl: this.gl,
             overlayItem,
@@ -7281,8 +7357,20 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             volumes: this.volumes,
             orientShader,
             r8Tex: this.r8Tex.bind(this),
-            TEXTURE7: this.gl.TEXTURE7
+            TEXTURE7: this.gl.TEXTURE7,
+            cachedTexture: isModulationCached ? cacheEntry!.modulation!.texture : null
         })
+        if (!isModulationCached && (reuseVoxelData || cacheEntry?.modulation)) {
+            if (cacheEntry?.modulation) {
+                this.gl.deleteTexture(cacheEntry.modulation.texture)
+                delete cacheEntry.modulation
+            }
+            if (modulateTexture && modKey) {
+                cacheEntry = cacheEntry ?? {}
+                cacheEntry.modulation = { texture: modulateTexture, key: modKey }
+                this._voxelTextureCache.set(overlayItem, cacheEntry)
+            }
+        }
 
         // Bind temporary 3D texture to the correct texture unit
         this.gl.activeTexture(TEXTURE_CONSTANTS.TEXTURE9_ORIENT)
@@ -7309,13 +7397,24 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
         })
         log.debug('back dims: ', this.back.dims)
         this.gl.bindVertexArray(this.unusedVAO)
-        this.gl.deleteTexture(tempTex3D)
-        this.gl.deleteTexture(modulateTexture)
+        if (tempTex3D !== cacheEntry?.voxels?.texture) {
+            this.gl.deleteTexture(tempTex3D)
+        }
+        if (modulateTexture !== cacheEntry?.modulation?.texture) {
+            this.gl.deleteTexture(modulateTexture)
+        }
         this.gl.deleteTexture(blendTexture)
         this.gl.viewport(0, 0, this.gl.canvas.width, this.gl.canvas.height)
         this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null)
 
         this.gl.deleteFramebuffer(fb)
+
+        // Cleanup label colormap texture if used
+        if (colormapLabelTexture !== null) {
+            this.gl.deleteTexture(colormapLabelTexture)
+            this.gl.activeTexture(TEXTURE_CONSTANTS.TEXTURE1_COLORMAPS)
+            this.gl.bindTexture(this.gl.TEXTURE_2D, this.colormapTexture)
+        }
 
         // Update gradient texture for layer 0
         if (layer === 0) {
@@ -7324,7 +7423,71 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             // compute it lazily, the next time a render tile is drawn (see updateGradientTextureIfStale)
             this._gradientHdr = hdr
             this._isGradientStale = true
+            this._backBake = backBake ? { texture: outTexture, ...backBake } : null
         }
+        this.updateLayerShaderState(layer)
+    }
+
+    /**
+     * Key of everything the background (layer 0) composite is derived from, or null if it cannot be
+     * reused (RGBA images, which also feed the PAQD texture, label colormaps, or the deprecated alphaThreshold).
+     * Objects are compared by identity (`refs`), everything else by value (`key`).
+     * @internal
+     */
+    private backgroundBakeKey(overlayItem: NVImage, modKey: VolumeModulation.ModulationKey | null): { refs: unknown[]; key: string } | null {
+        const hdr = overlayItem.hdr
+        if (!hdr || overlayItem.colormapLabel || 'alphaThreshold' in overlayItem || this.volumes.some((v) => v.hdr?.datatypeCode === NiiDataType.DT_RGBA32)) {
+            return null
+        }
+        // the two colormap rows (negative, positive) the background samples
+        const luts = this._colormapLuts ? Array.from(this._colormapLuts.subarray(0, 2 * 256 * 4)).join() : ''
+        const key = JSON.stringify([
+            overlayItem.cal_min,
+            overlayItem.cal_max,
+            overlayItem.cal_minNeg,
+            overlayItem.cal_maxNeg,
+            overlayItem.colormapNegative.length > 0,
+            overlayItem.colormapType,
+            overlayItem.opacity,
+            overlayItem.threshold_min,
+            overlayItem.threshold_max,
+            hdr.scl_slope,
+            hdr.scl_inter,
+            hdr.intent_code,
+            this.opts.atlasOutline,
+            this.opts.atlasActiveIndex,
+            this.back?.dims,
+            Array.from(overlayItem.toRAS ?? []),
+            modKey?.params ?? null,
+            luts
+        ])
+        return { refs: [overlayItem, overlayItem.img, modKey?.image ?? null, modKey?.img ?? null], key }
+    }
+
+    /**
+     * Release GPU textures cached for volumes that are no longer loaded.
+     * @internal
+     */
+    private releaseUnusedVoxelTextures(): void {
+        for (const [volume, entry] of this._voxelTextureCache) {
+            if (this.volumes.includes(volume)) {
+                continue
+            }
+            if (entry.voxels) {
+                this.gl.deleteTexture(entry.voxels.texture)
+            }
+            if (entry.modulation) {
+                this.gl.deleteTexture(entry.modulation.texture)
+            }
+            this._voxelTextureCache.delete(volume)
+        }
+    }
+
+    /**
+     * Updates render, picking and slice shader state after a layer was composited.
+     * @internal
+     */
+    private updateLayerShaderState(layer: number): void {
         // Update shader uniforms after texture operations
         if (!this.renderShader) {
             throw new Error('renderShader undefined')
@@ -7362,13 +7525,6 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             drawOpacity: this.drawOpacity,
             paqdUniforms: this.opts.paqdUniforms
         })
-
-        // Cleanup label colormap texture if used
-        if (colormapLabelTexture !== null) {
-            this.gl.deleteTexture(colormapLabelTexture)
-            this.gl.activeTexture(TEXTURE_CONSTANTS.TEXTURE1_COLORMAPS)
-            this.gl.bindTexture(this.gl.TEXTURE_2D, this.colormapTexture)
-        }
 
         // Bind drawing and PAQD textures for slice shader
         VolumeLayerRenderer.bindSliceShaderTextures({
@@ -7421,7 +7577,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
     setColormap(id: string, colormap: string): void {
         const idx = this.getVolumeIndexByID(id)
         this.volumes[idx].colormap = colormap
-        this.updateGLVolume()
+        this.updateGLVolume({ reuseVoxelData: true })
     }
 
     // port of https://github.com/rordenlab/niimath/blob/master/src/bwlabel.c
@@ -7706,7 +7862,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
     setColormapNegative(id: string, colormapNegative: string): void {
         const idx = this.getVolumeIndexByID(id)
         this.volumes[idx].colormapNegative = colormapNegative
-        this.updateGLVolume()
+        this.updateGLVolume({ reuseVoxelData: true })
     }
 
     /**
@@ -7735,6 +7891,28 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
     }
 
     /**
+     * Set the display threshold of a volume: voxels whose calibrated value (scl_slope/scl_inter applied)
+     * is below `min` or above `max` are transparent. Independent of the window (cal_min/cal_max) and
+     * applied on the GPU, so no mask volume is needed. Pass NaN (or omit `max`) for no limit on that side;
+     * `setThreshold(id, NaN, NaN)` removes the threshold. Applies to scalar (non-label, non-RGB) volumes.
+     * @param id - the ID of the NVImage
+     * @param min - lowest value shown (inclusive), NaN for no lower limit
+     * @param max - highest value shown (inclusive), NaN for no upper limit
+     * @example
+     * niivue.setThreshold(niivue.volumes[1].id, 3) // z-score overlay: show z >= 3
+     * niivue.setThreshold(niivue.volumes[1].id, 3, 8) // show 3 <= z <= 8
+     */
+    setThreshold(id: string, min: number = NaN, max: number = NaN): void {
+        const idx = this.getVolumeIndexByID(id)
+        if (idx < 0) {
+            return
+        }
+        this.volumes[idx].threshold_min = min
+        this.volumes[idx].threshold_max = max
+        this.updateGLVolume({ reuseVoxelData: true })
+    }
+
+    /**
      * adjust screen gamma. Low values emphasize shadows but can appear flat, high gamma hides shadow details.
      * @param gamma - selects luminance, default is 1
      * @example niivue.setGamma(1.0);
@@ -7743,7 +7921,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
     setGamma(gamma = 1.0): void {
         this.scene.gamma = gamma
         cmapper.gamma = gamma
-        this.updateGLVolume()
+        this.updateGLVolume({ reuseVoxelData: true })
     }
 
     /** Load all volumes for image opened with `limitFrames4D`, the user can also click the `...` on a 4D timeline to load deferred volumes
@@ -7981,6 +8159,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             addColormap(Array.from(this.colormap(this.colormapLists[i].name, this.colormapLists[i].invert)))
         }
         addColormap(Array.from(this.drawLut.lut))
+        this._colormapLuts = luts
         this.gl.texSubImage2D(this.gl.TEXTURE_2D, 0, 0, 0, 256, nMaps + 1, this.gl.RGBA, this.gl.UNSIGNED_BYTE, luts)
         return this
     }
