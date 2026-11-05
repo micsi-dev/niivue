@@ -189,6 +189,28 @@ export function setupBlendTexture(params: SetupBlendTextureParams): WebGLTexture
 }
 
 /**
+ * Display threshold bounds of a volume, in calibrated units (scl_slope/scl_inter applied).
+ * A bound that is not a finite number is disabled.
+ * @param overlayItem - volume with optional threshold_min / threshold_max
+ * @returns which bounds are active and their values (0 when inactive)
+ */
+export function thresholdBounds(overlayItem: Pick<NVImage, 'threshold_min' | 'threshold_max'>): {
+    isThresholdMin: boolean
+    isThresholdMax: boolean
+    thresholdMin: number
+    thresholdMax: number
+} {
+    const isThresholdMin = Number.isFinite(overlayItem.threshold_min)
+    const isThresholdMax = Number.isFinite(overlayItem.threshold_max)
+    return {
+        isThresholdMin,
+        isThresholdMax,
+        thresholdMin: isThresholdMin ? overlayItem.threshold_min : 0,
+        thresholdMax: isThresholdMax ? overlayItem.threshold_max : 0
+    }
+}
+
+/**
  * Parameters for configuring colormap uniforms
  */
 export interface ConfigureColormapUniformsParams {
@@ -234,6 +256,13 @@ export function configureColormapUniforms(params: ConfigureColormapUniformsParam
     gl.uniform1f(orientShader.uniforms.layer ?? null, layer)
     gl.uniform1f(orientShader.uniforms.cal_minNeg ?? null, mnNeg)
     gl.uniform1f(orientShader.uniforms.cal_maxNeg ?? null, mxNeg)
+
+    // Display threshold (scalar volumes): NaN/undefined bound = no limit on that side
+    const { isThresholdMin, isThresholdMax, thresholdMin, thresholdMax } = thresholdBounds(overlayItem)
+    gl.uniform1i(orientShader.uniforms.isThresholdMin ?? null, isThresholdMin ? 1 : 0)
+    gl.uniform1i(orientShader.uniforms.isThresholdMax ?? null, isThresholdMax ? 1 : 0)
+    gl.uniform1f(orientShader.uniforms.threshold_min ?? null, thresholdMin)
+    gl.uniform1f(orientShader.uniforms.threshold_max ?? null, thresholdMax)
 }
 
 /**

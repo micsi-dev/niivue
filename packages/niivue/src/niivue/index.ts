@@ -7105,12 +7105,20 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
                 const intercept = (255 * (hdr.scl_inter - overlayItem.cal_min)) / (overlayItem.cal_max - overlayItem.cal_min)
                 const cmap = new Uint8Array(this.colormap(overlayItem.colormap))
                 const cmap_U32 = new Uint32Array(cmap.buffer)
+                const thr = VolumeLayerRenderer.thresholdBounds(overlayItem)
                 let j = -1
                 for (let i = 0; i < nPix; i++) {
-                    const v = img[i + zOffset] * scale + intercept
+                    const raw = img[i + zOffset]
+                    const v = raw * scale + intercept
                     const v255 = Math.round(Math.min(255, Math.max(0, v))) // Clamp to 0..255
                     img2D_U32[i] = cmap_U32[v255]
                     img2D[(j += 4)] = opacity
+                    if (thr.isThresholdMin || thr.isThresholdMax) {
+                        const f = raw * hdr.scl_slope + hdr.scl_inter
+                        if ((thr.isThresholdMin && !(f >= thr.thresholdMin)) || (thr.isThresholdMax && !(f <= thr.thresholdMax))) {
+                            img2D[j] = 0
+                        }
+                    }
                 }
                 this.opts.is2DSliceShader = true
                 outTexture = this.rgbaTex2D(this.volumeTexture, TEXTURE_CONSTANTS.TEXTURE0_BACK_VOL, overlayItem.dimsRAS!, img2D as Uint8Array, false)
@@ -7731,6 +7739,28 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
         }
         this.volumes[idxTarget].modulationImage = idxModulation
         this.volumes[idxTarget].modulateAlpha = modulateAlpha
+        this.updateGLVolume()
+    }
+
+    /**
+     * Set the display threshold of a volume: voxels whose calibrated value (scl_slope/scl_inter applied)
+     * is below `min` or above `max` are transparent. Independent of the window (cal_min/cal_max) and
+     * applied on the GPU, so no mask volume is needed. Pass NaN (or omit `max`) for no limit on that side;
+     * `setThreshold(id, NaN, NaN)` removes the threshold. Applies to scalar (non-label, non-RGB) volumes.
+     * @param id - the ID of the NVImage
+     * @param min - lowest value shown (inclusive), NaN for no lower limit
+     * @param max - highest value shown (inclusive), NaN for no upper limit
+     * @example
+     * niivue.setThreshold(niivue.volumes[1].id, 3) // z-score overlay: show z >= 3
+     * niivue.setThreshold(niivue.volumes[1].id, 3, 8) // show 3 <= z <= 8
+     */
+    setThreshold(id: string, min: number = NaN, max: number = NaN): void {
+        const idx = this.getVolumeIndexByID(id)
+        if (idx < 0) {
+            return
+        }
+        this.volumes[idx].threshold_min = min
+        this.volumes[idx].threshold_max = max
         this.updateGLVolume()
     }
 

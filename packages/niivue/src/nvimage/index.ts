@@ -46,6 +46,14 @@ export class NVImage {
     nTotalFrame4D?: number
     cal_minNeg: number
     cal_maxNeg: number
+    /**
+     * Display threshold, in calibrated units (scl_slope/scl_inter applied): voxels whose value is
+     * below threshold_min or above threshold_max are transparent. Independent of the window
+     * (cal_min/cal_max) and applied on the GPU. NaN (default) disables that bound.
+     */
+    threshold_min = NaN
+    /** Upper display threshold, see threshold_min. NaN (default) = no upper limit. */
+    threshold_max = NaN
     colorbarVisible = true
     modulationImage: number | null = null
     modulateAlpha = 0 // if !=0, mod transparency with expon power |Alpha|

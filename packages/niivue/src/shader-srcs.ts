@@ -1377,6 +1377,10 @@ uniform int modulation;
 uniform highp sampler3D modulationVol;
 uniform float opacity;
 uniform mat4 mtx;
+uniform bool isThresholdMin;
+uniform bool isThresholdMax;
+uniform float threshold_min;
+uniform float threshold_max;
 void main(void) {
 	vec4 vx = vec4(TexCoord.xy, coordZ, 1.0) * mtx;
 	if ((vx.x < 0.0) || (vx.x > 1.0) || (vx.y < 0.0) || (vx.y > 1.0) || (vx.z < 0.0) || (vx.z > 1.0)) {
@@ -1386,6 +1390,14 @@ void main(void) {
 		return;
 	}
 	float f = (scl_slope * float(texture(intensityVol, vx.xyz).r)) + scl_inter;
+	//display threshold: calibrated values outside [threshold_min, threshold_max] are transparent
+	if ((isThresholdMin && !(f >= threshold_min)) || (isThresholdMax && !(f <= threshold_max))) {
+		if (layer < 1.0)
+			FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+		else
+			FragColor = texture(blend3D, vec3(TexCoord.xy, coordZ));
+		return;
+	}
 	float mn = cal_min;
 	float mx = cal_max;
 	if ((isAlphaThreshold) || (isColorbarFromZero))
