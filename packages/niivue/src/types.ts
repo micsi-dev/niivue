@@ -166,6 +166,14 @@ export type SyncOpts = {
     sliceType?: boolean
     crosshair?: boolean
     clipPlane?: boolean
+    /**
+     * 2D views of all linked instances fit the same world-space box: the union of the
+     * instances' volume (or mesh) extents, so the same pan/zoom shows the same region at
+     * the same scale even when the instances show different volumes.
+     * Implies world-space slices (isSliceMM) while enabled. Applies to the whole group
+     * passed to broadcastTo (this instance and the others).
+     */
+    sharedFOV?: boolean
 }
 
 export type UIData = {

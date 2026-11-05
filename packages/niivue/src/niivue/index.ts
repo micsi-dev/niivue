@@ -359,6 +359,8 @@ export class Niivue extends EventTarget {
     cuboidVertexBuffer?: WebGLBuffer
 
     otherNV: Niivue[] | null = null // another niivue instance that we wish to sync position with
+    private _sharedFOVGroup: Niivue[] | null = null // linked instances sharing one 2D field of view (syncOpts.sharedFOV)
+    private _isSliceMMBeforeSharedFOV = false // opts.isSliceMM to restore when the shared field of view ends
     volumeObject3D: NiivueObject3D | null = null
     pivot3D = [0, 0, 0] // center for rendering rotation
     furthestFromPivot = 10.0 // most distant point from pivot
@@ -977,13 +979,88 @@ export class Niivue extends EventTarget {
      * niivue1.broadcastTo([niivue2, niivue3])
      * @see {@link https://niivue.com/demos/features/sync.mesh.html | live demo usage}
      */
-    broadcastTo(otherNV: Niivue | Niivue[], syncOpts = { '2d': true, '3d': true }): void {
+    broadcastTo(otherNV: Niivue | Niivue[], syncOpts: SyncOpts = { '2d': true, '3d': true }): void {
         // if otherNV is a single instance then make it an array of one
         if (!(otherNV instanceof Array)) {
             otherNV = [otherNV]
         }
         this.otherNV = otherNV
         this.syncOpts = syncOpts
+        if (syncOpts.sharedFOV) {
+            this.setSharedFOVGroup([this, ...otherNV])
+        } else if (this._sharedFOVGroup) {
+            this.setSharedFOVGroup(null)
+        }
+    }
+
+    /**
+     * Make the 2D views of a group of instances fit one shared world-space box (the union of
+     * their volume or mesh extents), or end the shared field of view for this instance's group.
+     * While shared, each member draws its 2D slices in world space (opts.isSliceMM = true); the
+     * previous isSliceMM is restored when the group ends. Usually set via broadcastTo(..., { sharedFOV: true }).
+     * @param group - instances that share the field of view, or null to end the current group
+     * @internal
+     */
+    setSharedFOVGroup(group: Niivue[] | null): void {
+        const previous = this._sharedFOVGroup ?? [this]
+        const members = group ? Array.from(new Set(group)) : null
+        // leave: every member of the previous group that is not in the new one
+        for (const nv of previous) {
+            if (nv._sharedFOVGroup && (!members || !members.includes(nv))) {
+                nv._sharedFOVGroup = null
+                nv.opts.isSliceMM = nv._isSliceMMBeforeSharedFOV
+            }
+        }
+        if (members) {
+            for (const nv of members) {
+                if (!nv._sharedFOVGroup) {
+                    nv._isSliceMMBeforeSharedFOV = nv.opts.isSliceMM
+                }
+                nv._sharedFOVGroup = members
+                nv.opts.isSliceMM = true
+            }
+        }
+        const affected = new Set([...previous, ...(members ?? [])])
+        for (const nv of affected) {
+            nv.drawScene()
+        }
+    }
+
+    /**
+     * Union of the world-space extents of the instances sharing this instance's field of view,
+     * or null when the field of view is not shared (or no member has extents yet).
+     * @internal
+     */
+    sharedFOVExtentsMM(): [vec3, vec3] | null {
+        if (!this._sharedFOVGroup) {
+            return null
+        }
+        let mn: vec3 | null = null
+        let mx: vec3 | null = null
+        for (const nv of this._sharedFOVGroup) {
+            let eMin: ArrayLike<number> | undefined
+            let eMax: ArrayLike<number> | undefined
+            if (nv.volumes.length > 0) {
+                eMin = nv.volumeObject3D?.extentsMin
+                eMax = nv.volumeObject3D?.extentsMax
+            } else {
+                eMin = nv.extentsMin
+                eMax = nv.extentsMax
+            }
+            if (!eMin || !eMax) {
+                continue
+            }
+            if (!mn || !mx) {
+                mn = vec3.fromValues(eMin[0], eMin[1], eMin[2])
+                mx = vec3.fromValues(eMax[0], eMax[1], eMax[2])
+                continue
+            }
+            for (let i = 0; i < 3; i++) {
+                mn[i] = Math.min(mn[i], eMin[i])
+                mx[i] = Math.max(mx[i], eMax[i])
+            }
+        }
+        return mn && mx ? [mn, mx] : null
     }
 
     /**
@@ -6840,6 +6917,14 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             this.onVolumeUpdated()
         }
         this.drawScene()
+        if (this._sharedFOVGroup) {
+            // the shared field of view may have changed: redraw the other linked views
+            for (const nv of this._sharedFOVGroup) {
+                if (nv !== this && nv.canvas !== this.canvas) {
+                    nv.drawScene()
+                }
+            }
+        }
     }
 
     /**
@@ -9583,6 +9668,13 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
      */
     screenFieldOfViewMM(axCorSag = 0, forceSliceMM = false): vec3 {
         // extent of volume/mesh (in millimeters) in screen space
+        const shared = this.volumes.length < 1 || forceSliceMM || this.opts.isSliceMM ? this.sharedFOVExtentsMM() : null
+        if (shared) {
+            // linked instances with syncOpts.sharedFOV: union of their extents
+            const fovMM = vec3.create()
+            vec3.subtract(fovMM, this.swizzleVec3MM(shared[1], axCorSag), this.swizzleVec3MM(shared[0], axCorSag))
+            return fovMM
+        }
         if (this.volumes.length < 1) {
             let mnMM = vec3.fromValues(this.extentsMin[0], this.extentsMin[1], this.extentsMin[2])
             let mxMM = vec3.fromValues(this.extentsMax[0], this.extentsMax[1], this.extentsMax[2])
@@ -9632,6 +9724,15 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
      * @internal
      */
     screenFieldOfViewExtendedMM(axCorSag = 0): MM {
+        const shared = this.sharedFOVExtentsMM()
+        if (shared) {
+            // linked instances with syncOpts.sharedFOV: union of their extents
+            const mnMM = this.swizzleVec3MM(vec3.clone(shared[0]), axCorSag)
+            const mxMM = this.swizzleVec3MM(vec3.clone(shared[1]), axCorSag)
+            const fovMM = vec3.create()
+            vec3.subtract(fovMM, mxMM, mnMM)
+            return { mnMM, mxMM, rotation: mat4.create(), fovMM }
+        }
         if (this.volumes.length < 1) {
             let mnMM = vec3.fromValues(this.extentsMin[0], this.extentsMin[1], this.extentsMin[2])
             let mxMM = vec3.fromValues(this.extentsMax[0], this.extentsMax[1], this.extentsMax[2])
