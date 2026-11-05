@@ -12,18 +12,8 @@ export interface ConvertedFile {
   data: ArrayBuffer
 }
 
-/**
- * Loads DICOM files (or a single DICOM file) and converts them to
- * NIfTI using dcm2niix in the browser.
- *
- * @param data - An array of File objects or an array of DicomInput objects.
- * @returns A promise that resolves to an array of { name, data }
- *          where each data field is an ArrayBuffer containing the NIfTI file.
- */
-export async function dicomLoader(data: Array<File | DicomInput>): Promise<ConvertedFile[]> {
-  const dcm2niix = new Dcm2niix()
-  await dcm2niix.init()
-
+// Runs one conversion with an initialised Dcm2niix instance.
+async function convert(dcm2niix: Dcm2niix, data: Array<File | DicomInput>): Promise<ConvertedFile[]> {
   let returnedFiles: File[] = []
 
   if (Array.isArray(data) && data.length === 1 && (data[0] as DicomInput).data instanceof ArrayBuffer) {
@@ -54,4 +44,24 @@ export async function dicomLoader(data: Array<File | DicomInput>): Promise<Conve
   }
 
   return arrayBuffers
+}
+
+/**
+ * Loads DICOM files (or a single DICOM file) and converts them to
+ * NIfTI using dcm2niix in the browser.
+ *
+ * @param data - An array of File objects or an array of DicomInput objects.
+ * @returns A promise that resolves to an array of { name, data }
+ *          where each data field is an ArrayBuffer containing the NIfTI file.
+ */
+export async function dicomLoader(data: Array<File | DicomInput>): Promise<ConvertedFile[]> {
+  const dcm2niix = new Dcm2niix()
+  try {
+    await dcm2niix.init()
+    return await convert(dcm2niix, data)
+  } finally {
+    // Each Dcm2niix instance owns a Web Worker whose in-memory file system keeps the
+    // input DICOMs and the converted output. Terminate it so that memory is released.
+    dcm2niix.worker?.terminate()
+  }
 }
