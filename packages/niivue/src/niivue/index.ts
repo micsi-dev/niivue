@@ -202,6 +202,8 @@ export class Niivue extends EventTarget {
     gradientTexture: WebGLTexture | null = null // 3D texture for volume rendering lighting
     gradientTextureAmount = 0.0
     useCustomGradientTexture = false // flag to indicate if a custom gradient texture is used
+    private _gradientHdr: NiftiHeader | null = null // header of the background the gradient is derived from
+    private _isGradientStale = false // background changed since gradientTexture was computed
     renderGradientValues = false
     drawTexture: WebGLTexture | null = null // the GPU memory storage of the drawing
     drawSmoothedTexture: WebGLTexture | null = null // the GPU memory storage of the smoothed drawing
@@ -6638,6 +6640,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
      * @internal
      */
     gradientGL(hdr: NiftiHeader): void {
+        this._isGradientStale = false
         this.gradientTexture = VolumeRenderer.gradientGL({
             gl: this.gl,
             hdr,
@@ -6656,6 +6659,28 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
     }
 
     /**
+     * Compute the gradient texture if the background changed since it was last computed.
+     * Called before a 3D render tile is drawn, so 2D-only views never pay for it.
+     * @internal
+     */
+    updateGradientTextureIfStale(): void {
+        if (!this._isGradientStale || !this._gradientHdr || !this.volumeTexture) {
+            return
+        }
+        // this runs in the middle of drawing a frame: keep the state the frame relies on
+        const gl = this.gl
+        const framebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING)
+        const isBlend = gl.isEnabled(gl.BLEND)
+        const activeTexture = gl.getParameter(gl.ACTIVE_TEXTURE)
+        this.gradientGL(this._gradientHdr)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer)
+        if (isBlend) {
+            gl.enable(gl.BLEND)
+        }
+        gl.activeTexture(activeTexture)
+    }
+
+    /**
      * Get the gradient texture produced by gradientGL as a TypedArray
      * @returns Float32Array containing the gradient texture data, or null if no gradient texture exists
      * @example
@@ -6669,6 +6694,7 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
      * @see {@link https://niivue.com/demos/features/gradient.custom.html | live demo usage}
      */
     getGradientTextureData(): Float32Array | null {
+        this.updateGradientTextureIfStale()
         return VolumeRenderer.getGradientTextureData({
             gl: this.gl,
             gradientTexture: this.gradientTexture,
@@ -6708,6 +6734,10 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
 
         this.gradientTexture = result.gradientTexture
         this.useCustomGradientTexture = result.useCustomGradientTexture
+        if (result.useCustomGradientTexture) {
+            // do not replace the custom texture on the next render; a later background refresh still does
+            this._isGradientStale = false
+        }
 
         // Redraw scene to apply changes if custom texture was set
         if (data !== null && result.useCustomGradientTexture) {
@@ -6939,6 +6969,8 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
         } // force crosshairs3D redraw
         let mtx = mat4.clone(overlayItem.toRAS!)
         if (layer === 0) {
+            // set again below once the new background texture exists (not for the 2D-texture paths)
+            this._isGradientStale = false
             // Create and assign volumeObject3D FIRST
             this.volumeObject3D = VolumeLayerRenderer.setupVolumeObject3D({
                 overlayItem,
@@ -7203,21 +7235,10 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
         // Update gradient texture for layer 0
         if (layer === 0) {
             this.volumeTexture = outTexture
-            this.gradientTexture = VolumeRenderer.gradientGL({
-                gl: this.gl,
-                hdr,
-                genericVAO: this.genericVAO,
-                unusedVAO: this.unusedVAO,
-                volumeTexture: this.volumeTexture,
-                paqdTexture: this.paqdTexture,
-                gradientTexture: this.gradientTexture,
-                gradientOrder: this.opts.gradientOrder,
-                blurShader: this.blurShader!,
-                gradientPrePassShader: this.gradientPrePassShader!,
-                sobelFirstOrderShader: this.sobelFirstOrderShader!,
-                sobelSecondOrderShader: this.sobelSecondOrderShader!,
-                rgbaTex: this.rgbaTex.bind(this)
-            })
+            // The gradient is only used by 3D renderings and is expensive (two passes per slice):
+            // compute it lazily, the next time a render tile is drawn (see updateGradientTextureIfStale)
+            this._gradientHdr = hdr
+            this._isGradientStale = true
         }
         // Update shader uniforms after texture operations
         if (!this.renderShader) {
@@ -10980,6 +11001,12 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
         gl.depthMask(true)
 
         this.draw3DLabels(mvpMatrix, relativeLTWH, false)
+
+        // lazily (re)compute the gradient used for lighting; it changes the viewport,
+        // so do it before the viewport is restricted to this tile
+        if (this.volumes.length > 0) {
+            this.updateGradientTextureIfStale()
+        }
 
         // restrict viewport to tile/bounds
         this.gl.viewport(glLTWH[0], glLTWH[1], glLTWH[2], glLTWH[3])
