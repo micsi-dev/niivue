@@ -14,11 +14,12 @@ import type { NVImage, TypedVoxelArray } from '@/nvimage'
  * @param z - Z coordinate (0-indexed).
  * @param frame4D - Optional 4D frame index (default is 0).
  * @param isReadImaginary - If true, returns data from the imaginary component (if present).
+ * @param isOutOfBoundsNaN - If true, coordinates outside the volume return [NaN] instead of the nearest edge voxel (default false).
  * @returns An array of one or more voxel values at the specified location.
  *
  * @see https://niivue.com/demos/features/voxel.html
  */
-export function getValues(nvImage: NVImage, x: number, y: number, z: number, frame4D = 0, isReadImaginary = false): number[] {
+export function getValues(nvImage: NVImage, x: number, y: number, z: number, frame4D = 0, isReadImaginary = false, isOutOfBoundsNaN = false): number[] {
     if (!nvImage.hdr) {
         throw new Error('getValue: NVImage header is not defined.')
     }
@@ -43,6 +44,14 @@ export function getValues(nvImage: NVImage, x: number, y: number, z: number, fra
         z = pos[2]
     }
 
+    if (isOutOfBoundsNaN) {
+        const rx = Math.round(x)
+        const ry = Math.round(y)
+        const rz = Math.round(z)
+        if (!(rx >= 0 && rx < nx && ry >= 0 && ry < ny && rz >= 0 && rz < nz)) {
+            return [NaN]
+        }
+    }
     // Clamp coordinates to valid range
     x = Math.max(0, Math.min(Math.round(x), nx - 1))
     y = Math.max(0, Math.min(Math.round(y), ny - 1))
@@ -107,10 +116,11 @@ export function getValues(nvImage: NVImage, x: number, y: number, z: number, fra
  * @param z - Z coordinate (0-indexed)
  * @param frame4D - 4D frame index (0-indexed)
  * @param isReadImaginary - Flag to read from imaginary data array if complex
+ * @param isOutOfBoundsNaN - If true, coordinates outside the volume return NaN instead of the nearest edge voxel (default false)
  * @returns Scaled voxel intensity
  */
-export function getValue(nvImage: NVImage, x: number, y: number, z: number, frame4D = 0, isReadImaginary = false): number {
-    const vals = getValues(nvImage, x, y, z, frame4D, isReadImaginary)
+export function getValue(nvImage: NVImage, x: number, y: number, z: number, frame4D = 0, isReadImaginary = false, isOutOfBoundsNaN = false): number {
+    const vals = getValues(nvImage, x, y, z, frame4D, isReadImaginary, isOutOfBoundsNaN)
     if (vals.length < 3) {
         return vals[0]
     }

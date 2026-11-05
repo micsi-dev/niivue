@@ -10583,7 +10583,8 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
             values: this.volumes.map((v) => {
                 const mm = this.frac2mm(this.scene.crosshairPos, 0, true)
                 const vox = v.mm2vox(mm as number[]) // e.mm2vox
-                const val = v.getValue(vox[0], vox[1], vox[2], v.frame4D)
+                // NaN when the location is outside this volume's field of view
+                const val = v.getValue(vox[0], vox[1], vox[2], v.frame4D, false, true)
                 return {
                     name: v.name,
                     value: val,

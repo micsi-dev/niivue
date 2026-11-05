@@ -1341,19 +1341,23 @@ export class NVImage {
     }
 
     /**
-     * Returns voxel intensity at specific native coordinates.
+     * Returns voxel intensity at specific RAS voxel coordinates.
+     * Coordinates outside the volume are clamped to the nearest edge voxel unless
+     * `isOutOfBoundsNaN` is true, in which case NaN is returned.
      * Delegates to VolumeUtils.getValue.
      */
-    getValue(x: number, y: number, z: number, frame4D = 0, isReadImaginary = false): number {
-        return VolumeUtils.getValue(this, x, y, z, frame4D, isReadImaginary)
+    getValue(x: number, y: number, z: number, frame4D = 0, isReadImaginary = false, isOutOfBoundsNaN = false): number {
+        return VolumeUtils.getValue(this, x, y, z, frame4D, isReadImaginary, isOutOfBoundsNaN)
     }
 
     /**
-     * Returns voxel intensities at specific native coordinates.
-     * Delegates to VolumeUtils.getValue.
+     * Returns voxel intensities at specific RAS voxel coordinates.
+     * Coordinates outside the volume are clamped to the nearest edge voxel unless
+     * `isOutOfBoundsNaN` is true, in which case [NaN] is returned.
+     * Delegates to VolumeUtils.getValues.
      */
-    getValues(x: number, y: number, z: number, frame4D = 0, isReadImaginary = false): number[] {
-        return VolumeUtils.getValues(this, x, y, z, frame4D, isReadImaginary)
+    getValues(x: number, y: number, z: number, frame4D = 0, isReadImaginary = false, isOutOfBoundsNaN = false): number[] {
+        return VolumeUtils.getValues(this, x, y, z, frame4D, isReadImaginary, isOutOfBoundsNaN)
     }
 
     /**

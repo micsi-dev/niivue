@@ -140,6 +140,7 @@ export type NiiVueLocationValue = {
     id: string
     mm: vec4
     name: string
+    /** intensity at the location; NaN if the location is outside this volume */
     value: number
     vox: vec3
 }
