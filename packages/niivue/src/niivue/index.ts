@@ -193,6 +193,9 @@ export class Niivue extends EventTarget {
     _gl: WebGL2RenderingContext | null = null // the gl context
     isBusy = false // flag to indicate if the scene is busy drawing
     needsRefresh = false // flag to indicate if the scene needs to be redrawn
+    private _batchDepth = 0 // > 0 while inside batchUpdate()
+    private _batchNeedsGLVolume = false // updateGLVolume() was requested during a batch
+    private _batchNeedsDraw = false // drawScene() was requested during a batch
     colormapTexture: WebGLTexture | null = null // the GPU memory storage of the colormap
     colormapLists: ColormapListEntry[] = [] // one entry per colorbar: min, max, tic
     volumeTexture: WebGLTexture | null = null // the GPU memory storage of the volume
@@ -6713,6 +6716,58 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
     }
 
     /**
+     * Apply several changes with a single GPU recomposite.
+     * Methods such as addVolume, removeVolume, setModulationImage, setColormap or setOpacity
+     * each call updateGLVolume(), which re-renders every layer. Inside `batchUpdate` those
+     * calls (and drawScene) are deferred and run once when the outermost batch ends.
+     * Batches can be nested. If `fn` returns a promise, the batch ends when it settles.
+     * GPU-derived state (e.g. the background's `dims`) is not refreshed until the batch ends.
+     * @param fn - function that makes the changes
+     * @returns the value returned by `fn`
+     * @example
+     * nv.batchUpdate(() => {
+     *   nv.addVolume(overlay)
+     *   nv.setModulationImage(overlay.id, nv.volumes[0].id)
+     *   nv.setOpacity(1, 0.5)
+     * })
+     */
+    batchUpdate<T>(fn: () => T): T {
+        this._batchDepth++
+        let result: T
+        try {
+            result = fn()
+        } catch (err) {
+            this._endBatchUpdate()
+            throw err
+        }
+        if (result instanceof Promise) {
+            return result.finally(() => this._endBatchUpdate()) as T
+        }
+        this._endBatchUpdate()
+        return result
+    }
+
+    /**
+     * Ends one batchUpdate() level; flushes deferred updates when the outermost batch ends.
+     * @internal
+     */
+    private _endBatchUpdate(): void {
+        this._batchDepth = Math.max(0, this._batchDepth - 1)
+        if (this._batchDepth > 0) {
+            return
+        }
+        const needsGLVolume = this._batchNeedsGLVolume
+        const needsDraw = this._batchNeedsDraw
+        this._batchNeedsGLVolume = false
+        this._batchNeedsDraw = false
+        if (needsGLVolume) {
+            this.updateGLVolume() // also draws the scene
+        } else if (needsDraw) {
+            this.drawScene()
+        }
+    }
+
+    /**
      * update the webGL 2.0 scene after making changes to the array of volumes. It's always good to call this method after altering one or more volumes manually (outside of Niivue setter methods)
      * @example
      * niivue = new Niivue()
@@ -6720,6 +6775,11 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
      * @see {@link https://niivue.com/demos/features/colormaps.html | live demo usage}
      */
     updateGLVolume(): void {
+        if (this._batchDepth > 0) {
+            // inside batchUpdate(): recomposite once when the outermost batch ends
+            this._batchNeedsGLVolume = true
+            return
+        }
         // load volume or change contrast
         let visibleLayers = 0
         const numLayers = this.volumes.length
@@ -12359,6 +12419,11 @@ if (perm[0] === 1 && perm[1] === 2 && perm[2] === 3) {
      * @internal
      */
     drawScene(): string | void {
+        if (this._batchDepth > 0) {
+            // inside batchUpdate(): draw once when the outermost batch ends
+            this._batchNeedsDraw = true
+            return
+        }
         if (this.isBusy) {
             // limit concurrent draw calls (chrome v FireFox)
             this.needsRefresh = true
