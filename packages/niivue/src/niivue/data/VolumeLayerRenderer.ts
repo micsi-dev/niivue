@@ -493,6 +493,8 @@ export interface SetupVolumeTextureDataParams {
     orientShaderRGBU: Shader
     orientShaderAtlasU: Shader
     orientShaderAtlasI: Shader
+    /** false: the bound texture already holds this volume's voxels, only select the shader (default true) */
+    upload?: boolean
 }
 
 /**
@@ -510,6 +512,8 @@ export interface SetupVolumeTextureDataResult {
  */
 export function setupVolumeTextureData(params: SetupVolumeTextureDataParams): SetupVolumeTextureDataResult {
     const { gl, hdr, img, orientShaderU, orientShaderI, orientShaderF, orientShaderRGBU, orientShaderAtlasU, orientShaderAtlasI } = params
+    // upload === false: the bound texture already holds these voxels, only select the shader
+    const upload = params.upload !== false
 
     let orientShader = orientShaderU
 
@@ -517,36 +521,48 @@ export function setupVolumeTextureData(params: SetupVolumeTextureDataParams): Se
         if (hdr.intent_code === NII_INTENT_LABEL) {
             orientShader = orientShaderAtlasU
         }
-        gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R8UI, hdr.dims[1], hdr.dims[2], hdr.dims[3])
-        gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED_INTEGER, gl.UNSIGNED_BYTE, img)
+        if (upload) {
+            gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R8UI, hdr.dims[1], hdr.dims[2], hdr.dims[3])
+            gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED_INTEGER, gl.UNSIGNED_BYTE, img)
+        }
     } else if (hdr.datatypeCode === NII_DT_INT16) {
         orientShader = orientShaderI
         if (hdr.intent_code === NII_INTENT_LABEL) {
             orientShader = orientShaderAtlasI
         }
-        gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R16I, hdr.dims[1], hdr.dims[2], hdr.dims[3])
-        gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED_INTEGER, gl.SHORT, img)
+        if (upload) {
+            gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R16I, hdr.dims[1], hdr.dims[2], hdr.dims[3])
+            gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED_INTEGER, gl.SHORT, img)
+        }
     } else if (hdr.datatypeCode === NII_DT_FLOAT32) {
-        gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R32F, hdr.dims[1], hdr.dims[2], hdr.dims[3])
-        gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED, gl.FLOAT, img)
+        if (upload) {
+            gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R32F, hdr.dims[1], hdr.dims[2], hdr.dims[3])
+            gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED, gl.FLOAT, img)
+        }
         orientShader = orientShaderF
     } else if (hdr.datatypeCode === NII_DT_FLOAT64) {
-        const img32f = Float32Array.from(img)
-        gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R32F, hdr.dims[1], hdr.dims[2], hdr.dims[3])
-        gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED, gl.FLOAT, img32f)
+        if (upload) {
+            const img32f = Float32Array.from(img)
+            gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R32F, hdr.dims[1], hdr.dims[2], hdr.dims[3])
+            gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED, gl.FLOAT, img32f)
+        }
         orientShader = orientShaderF
     } else if (hdr.datatypeCode === NII_DT_RGB24) {
         orientShader = orientShaderRGBU
         orientShader.use(gl)
         gl.uniform1i(orientShader.uniforms.hasAlpha, 0)
-        gl.texStorage3D(gl.TEXTURE_3D, 1, gl.RGB8UI, hdr.dims[1], hdr.dims[2], hdr.dims[3])
-        gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RGB_INTEGER, gl.UNSIGNED_BYTE, img)
+        if (upload) {
+            gl.texStorage3D(gl.TEXTURE_3D, 1, gl.RGB8UI, hdr.dims[1], hdr.dims[2], hdr.dims[3])
+            gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RGB_INTEGER, gl.UNSIGNED_BYTE, img)
+        }
     } else if (hdr.datatypeCode === NII_DT_UINT16) {
         if (hdr.intent_code === NII_INTENT_LABEL) {
             orientShader = orientShaderAtlasU
         }
-        gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R16UI, hdr.dims[1], hdr.dims[2], hdr.dims[3])
-        gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED_INTEGER, gl.UNSIGNED_SHORT, img)
+        if (upload) {
+            gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R16UI, hdr.dims[1], hdr.dims[2], hdr.dims[3])
+            gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, hdr.dims[1], hdr.dims[2], hdr.dims[3], gl.RED_INTEGER, gl.UNSIGNED_SHORT, img)
+        }
     }
 
     return { orientShader }

@@ -17,6 +17,63 @@ export interface ModulationParams {
     orientShader: Shader
     r8Tex: (texID: WebGLTexture | null, activeID: number, dims: number[], isInit: boolean) => WebGLTexture | null
     TEXTURE7: number
+    /** modulation texture computed earlier from the same inputs (see modulationKey); reused instead of recomputed */
+    cachedTexture?: WebGLTexture | null
+}
+
+/**
+ * Everything the modulation texture of a volume is derived from.
+ * Two keys with the same `image`, `img` and `params` produce the same texture.
+ */
+export interface ModulationKey {
+    image: NVImage
+    img: unknown
+    params: string
+}
+
+/**
+ * Key describing the modulation texture setupModulation() would build for a volume.
+ * @param overlayItem - the modulated volume
+ * @param hdr - header of the modulated volume
+ * @param volumes - all volumes (overlayItem.modulationImage indexes into it)
+ * @returns the key, or null when the volume is not modulated
+ */
+export function modulationKey(overlayItem: NVImage, hdr: { dims: number[] }, volumes: NVImage[]): ModulationKey | null {
+    const idx = overlayItem.modulationImage
+    if (idx === null || idx < 0 || idx >= volumes.length) {
+        return null
+    }
+    const m = volumes[idx]
+    const mhdr = m.hdr!
+    if (mhdr.dims[1] !== hdr.dims[1] || mhdr.dims[2] !== hdr.dims[2] || mhdr.dims[3] !== hdr.dims[3]) {
+        return null
+    }
+    const params = JSON.stringify([
+        m.cal_min,
+        m.cal_max,
+        m.cal_minNeg,
+        m.cal_maxNeg,
+        m.colormapNegative.length > 0,
+        m.frame4D,
+        mhdr.datatypeCode,
+        mhdr.scl_slope,
+        mhdr.scl_inter,
+        overlayItem.modulateAlpha,
+        hdr.dims.slice(1, 4)
+    ])
+    return { image: m, img: m.img, params }
+}
+
+/**
+ * @param a - first key
+ * @param b - second key
+ * @returns true if both keys describe the same modulation texture
+ */
+export function isSameModulationKey(a: ModulationKey | null | undefined, b: ModulationKey | null | undefined): boolean {
+    if (!a || !b) {
+        return false
+    }
+    return a.image === b.image && a.img === b.img && a.params === b.params
 }
 
 /**
@@ -57,6 +114,12 @@ export function setupModulation(params: ModulationParams): ModulationResult {
         gl.uniform1f(orientShader.uniforms.opacity, 1.0)
     } else {
         gl.uniform1i(orientShader.uniforms.modulation, 1)
+    }
+
+    if (params.cachedTexture) {
+        gl.activeTexture(TEXTURE7)
+        gl.bindTexture(gl.TEXTURE_3D, params.cachedTexture)
+        return { modulateTexture: params.cachedTexture }
     }
 
     // Create modulation texture

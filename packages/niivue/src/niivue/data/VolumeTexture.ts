@@ -10,6 +10,42 @@ import { log } from '@/logger'
 const TEXTURE9_ORIENT = 33993
 
 /**
+ * GPU textures derived from one volume's voxels, kept between display-only updates
+ * (Niivue.updateGLVolume({ reuseVoxelData: true })).
+ */
+export interface VoxelTextureCacheEntry {
+    /** raw voxels of the displayed frame (the orient shader input) */
+    voxels?: {
+        texture: WebGLTexture
+        img: unknown
+        frame4D: number
+        datatypeCode: number
+        dims: number[]
+    }
+    /** modulation texture and the inputs it was computed from */
+    modulation?: {
+        texture: WebGLTexture
+        key: { image: NVImage; img: unknown; params: string }
+    }
+}
+
+/**
+ * Whether a cached voxel texture still holds the voxels refreshLayers would upload for a volume.
+ * Only the identity of `img` is compared: callers that modify `img` in place must not reuse it.
+ * @param entry - cache entry of the volume
+ * @param overlayItem - the volume
+ * @returns true if the texture can be reused
+ */
+export function isVoxelTextureCurrent(entry: VoxelTextureCacheEntry | undefined, overlayItem: NVImage): boolean {
+    const v = entry?.voxels
+    const hdr = overlayItem.hdr
+    if (!v || !hdr) {
+        return false
+    }
+    return v.img === overlayItem.img && v.frame4D === overlayItem.frame4D && v.datatypeCode === hdr.datatypeCode && v.dims[0] === hdr.dims[1] && v.dims[1] === hdr.dims[2] && v.dims[2] === hdr.dims[3]
+}
+
+/**
  * Prepare layer data by extracting the appropriate frame for 4D volumes
  * @param overlayItem - Volume to prepare
  * @returns Image data for the current frame
