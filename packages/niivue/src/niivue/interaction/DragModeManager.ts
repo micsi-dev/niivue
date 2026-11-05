@@ -423,6 +423,65 @@ export function calculateIntensityRangeFromVoxels(params: CalculateIntensityRang
 }
 
 /**
+ * Parameters for calculating the intensity range of a box given in RAS voxel indices
+ */
+export interface CalculateIntensityRangeRASParams {
+    /** [start, end) RAS voxel range along x */
+    xrange: [number, number]
+    /** [start, end) RAS voxel range along y */
+    yrange: [number, number]
+    /** [start, end) RAS voxel range along z */
+    zrange: [number, number]
+    /** RAS dimensions of the volume (dimsRAS: [ndim, nx, ny, nz, ...]) */
+    dimsRAS: number[]
+    /** returns the calibrated (scl_slope/scl_inter applied) value at a RAS voxel, e.g. NVImage.getValue */
+    getValue: (x: number, y: number, z: number) => number
+}
+
+/**
+ * Calculates the min and max calibrated intensity inside a box of RAS voxel indices.
+ * The box is clipped to the volume, and NaN values are ignored. Unlike
+ * calculateIntensityRangeFromVoxels the returned values are already scaled, and the
+ * voxel indices are interpreted in RAS order, so it works for any volume, not only
+ * the background.
+ *
+ * @param params - Parameters for intensity range calculation
+ * @returns Calibrated min and max intensities and whether there is variation
+ */
+export function calculateIntensityRangeFromRASVoxels(params: CalculateIntensityRangeRASParams): IntensityRangeResult {
+    const { xrange, yrange, zrange, dimsRAS, getValue } = params
+    let hi = -Number.MAX_VALUE
+    let lo = Number.MAX_VALUE
+    const x0 = Math.max(0, xrange[0])
+    const x1 = Math.min(dimsRAS[1], xrange[1])
+    const y0 = Math.max(0, yrange[0])
+    const y1 = Math.min(dimsRAS[2], yrange[1])
+    const z0 = Math.max(0, zrange[0])
+    const z1 = Math.min(dimsRAS[3], zrange[1])
+    for (let z = z0; z < z1; z++) {
+        for (let y = y0; y < y1; y++) {
+            for (let x = x0; x < x1; x++) {
+                const v = getValue(x, y, z)
+                if (isNaN(v)) {
+                    continue
+                }
+                if (lo > v) {
+                    lo = v
+                }
+                if (hi < v) {
+                    hi = v
+                }
+            }
+        }
+    }
+    return {
+        lo,
+        hi,
+        hasVariation: lo < hi
+    }
+}
+
+/**
  * Adjusts voxel ranges for constant dimensions to ensure at least one iteration.
  *
  * @param startVox - Start voxel coordinates

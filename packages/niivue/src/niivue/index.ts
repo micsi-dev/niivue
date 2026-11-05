@@ -88,7 +88,7 @@ import { findBoundarySlices, interpolateMaskSlices, drawUndo } from '@/drawing'
 import { vertFontShader, fragFontShader, vertBmpShader, fragBmpShader, vertMeshShader, fragMeshDepthShader } from '@/shader-srcs'
 import { Shader } from '@/shader'
 import { log } from '@/logger'
-import { deg2rad, img2ras16, intensityRaw2Scaled, isRadiological, negMinMax, swizzleVec3, tickSpacing, unProject, unpackFloatFromVec4i, readFileAsDataURL } from '@/utils'
+import { deg2rad, img2ras16, isRadiological, negMinMax, swizzleVec3, tickSpacing, unProject, unpackFloatFromVec4i, readFileAsDataURL } from '@/utils'
 import NVSerializer from '@/nvserializer'
 const { version } = packageJson
 type FontMetricsJsonBounds = {
@@ -1532,17 +1532,30 @@ export class Niivue extends EventTarget {
         if (!MouseController.hasDragMoved(this.uiData.dragStart, this.uiData.dragEnd)) {
             return
         }
+        const vol = this.volumes[volIdx]
+        if (!vol || !vol.hdr || !vol.img || !vol.dimsRAS) {
+            return
+        }
+        // The canvas maps to the background's texture fractions. For an overlay, go through
+        // world space (mm) into the overlay's own RAS voxels (same mapping as the location readout).
+        const frac2volVox = (frac: vec3): vec3 => {
+            if (volIdx === 0) {
+                return this.frac2vox(frac, 0)
+            }
+            const mm = this.frac2mm(frac, 0, true)
+            return vol.mm2vox(Array.from(mm)) as vec3
+        }
         // calculate our box
         let frac = this.canvasPos2frac([this.uiData.dragStart[0], this.uiData.dragStart[1]])
         if (frac[0] < 0) {
             return
         }
-        const startVox = this.frac2vox(frac, volIdx)
+        const startVox = frac2volVox(frac)
         frac = this.canvasPos2frac([this.uiData.dragEnd[0], this.uiData.dragEnd[1]])
         if (frac[0] < 0) {
             return
         }
-        const endVox = this.frac2vox(frac, volIdx)
+        const endVox = frac2volVox(frac)
 
         const xrange = this.calculateMinMaxVoxIdx([startVox[0], endVox[0]])
         const yrange = this.calculateMinMaxVoxIdx([startVox[1], endVox[1]])
@@ -1551,29 +1564,23 @@ export class Niivue extends EventTarget {
         // Adjust ranges for constant dimensions
         const adjustedRanges = DragModeManager.adjustRangesForConstantDimension(startVox, endVox, xrange, yrange, zrange)
 
-        const hdr = this.volumes[volIdx].hdr
-        const img = this.volumes[volIdx].img
-        if (!hdr || !img) {
-            return
-        }
-
-        // Calculate intensity range using helper
-        const intensityResult = DragModeManager.calculateIntensityRangeFromVoxels({
+        // Calculate intensity range: getValue indexes RAS voxels, reads the displayed
+        // 4D frame and applies scl_slope/scl_inter (once)
+        const frame4D = vol.frame4D
+        const intensityResult = DragModeManager.calculateIntensityRangeFromRASVoxels({
             xrange: adjustedRanges.xrange,
             yrange: adjustedRanges.yrange,
             zrange: adjustedRanges.zrange,
-            dims: hdr.dims,
-            img
+            dimsRAS: vol.dimsRAS,
+            getValue: (x, y, z) => vol.getValue(x, y, z, frame4D)
         })
 
         if (!intensityResult.hasVariation) {
             return
         } // no variability or outside volume
 
-        const mnScale = intensityRaw2Scaled(hdr, intensityResult.lo)
-        const mxScale = intensityRaw2Scaled(hdr, intensityResult.hi)
-        this.volumes[volIdx].cal_min = mnScale
-        this.volumes[volIdx].cal_max = mxScale
+        this.volumes[volIdx].cal_min = intensityResult.lo
+        this.volumes[volIdx].cal_max = intensityResult.hi
         this._emitEvent('intensityChange', this.volumes[volIdx])
         this.onIntensityChange(this.volumes[volIdx])
     }
