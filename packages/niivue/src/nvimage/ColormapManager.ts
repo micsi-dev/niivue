@@ -13,6 +13,30 @@ import { cmapper, type ColorMap } from '@/colortables'
 import * as IntensityCalibration from '@/nvimage/IntensityCalibration'
 
 /**
+ * True if the colormap carries its own intensity range (min !== max).
+ *
+ * @param cm - Colormap name
+ */
+function hasColormapRange(cm: string | undefined): boolean {
+    if (!cm) {
+        return false
+    }
+    const cmap = cmapper.colormapFromKey(cm)
+    const mn = cmap.min ?? 0
+    const mx = cmap.max ?? 0
+    return mn !== mx
+}
+
+/**
+ * True if the image already has a usable window.
+ *
+ * @param nvImage - The NVImage instance
+ */
+function hasCalMinMax(nvImage: NVImage): boolean {
+    return Number.isFinite(nvImage.cal_min) && Number.isFinite(nvImage.cal_max)
+}
+
+/**
  * Set continuous colormap.
  * Base function for niivue.setColormap().
  * Colormaps are continuously interpolated between 256 values (0..256).
@@ -21,8 +45,14 @@ import * as IntensityCalibration from '@/nvimage/IntensityCalibration'
  * @param cm - Colormap name
  */
 export function setColormap(nvImage: NVImage, cm: string): void {
+    const previous = nvImage._colormap
     nvImage._colormap = cm
-    IntensityCalibration.calMinMax(nvImage)
+    // Changing the colormap must not discard the current window (cal_min/cal_max).
+    // Only compute it when it is not set yet, or when the new or previous colormap
+    // defines its own intensity range (e.g. the ct_* colormaps), as before.
+    if (!hasCalMinMax(nvImage) || hasColormapRange(cm) || hasColormapRange(previous)) {
+        IntensityCalibration.calMinMax(nvImage)
+    }
     if (nvImage.onColormapChange) {
         nvImage.onColormapChange(nvImage)
     }
